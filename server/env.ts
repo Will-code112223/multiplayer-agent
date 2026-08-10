@@ -23,3 +23,13 @@ if (fs.existsSync(envFile)) {
     console.warn(`[env] could not read .env: ${error instanceof Error ? error.message : error}`);
   }
 }
+
+/**
+ * Optional shared passcode. When set, every API call and WebSocket join must
+ * present it.
+ *
+ * This is the only real access control in the app. Roles are a UX affordance
+ * that any participant can change for themselves; this is the gate that
+ * actually keeps strangers out of a session that spends your API credits.
+ */
+export const ACCESS_CODE = process.env.ACCESS_CODE?.trim() || null;

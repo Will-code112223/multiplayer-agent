@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { AccessGate } from "./AccessGate.tsx";
+import { getServerConfig, listSessions, loadCode, Unauthorized } from "./api.ts";
 import { Lobby } from "./Lobby.tsx";
 import { Room } from "./Room.tsx";
 
@@ -17,7 +19,30 @@ function useRoute(): string | null {
   return sessionId;
 }
 
+type Access = "checking" | "locked" | "open";
+
 export function App() {
   const sessionId = useRoute();
+  const [access, setAccess] = useState<Access>("checking");
+
+  const check = useCallback(async () => {
+    try {
+      const config = await getServerConfig();
+      if (!config.authRequired) return setAccess("open");
+      // A stored code from a previous visit should not force the gate again.
+      if (!loadCode()) return setAccess("locked");
+      await listSessions();
+      setAccess("open");
+    } catch (error) {
+      setAccess(error instanceof Unauthorized ? "locked" : "open");
+    }
+  }, []);
+
+  useEffect(() => {
+    void check();
+  }, [check]);
+
+  if (access === "checking") return <div className="gate" />;
+  if (access === "locked") return <AccessGate onUnlocked={() => setAccess("open")} />;
   return sessionId ? <Room key={sessionId} sessionId={sessionId} /> : <Lobby />;
 }

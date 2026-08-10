@@ -11,7 +11,8 @@
     "start": "node server/index.ts",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node test/session-replay.mjs"
+    "test": "node test/session-replay.mjs && node test/features.mjs && node test/auth.mjs && node test/persistence.mjs",
+    "clean:workspace": "rm -rf workspace data"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0",

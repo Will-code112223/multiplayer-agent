@@ -17,6 +17,7 @@ npm run dev
 ```
 
 Open http://localhost:5173, start a session, and paste the URL into a second browser window.
+You'll be asked for a name, a colour, and whether you're joining as a participant or an observer.
 
 To play both sides from one browser, add `?as=Name` to the URL.
 Without it every tab shares one stored identity and shows up as the same person:
@@ -24,6 +25,8 @@ Without it every tab shares one stored identity and shows up as the same person:
 ```
 http://localhost:5173/?as=Boris#/s/<session-id>
 ```
+
+To require a passcode, set `ACCESS_CODE` in `.env`. Everyone then needs it to open the app or connect.
 
 ## API keys
 
@@ -52,7 +55,7 @@ The key never leaves the server.
 The browser talks only to this server, and this server talks to Anthropic.
 Do not put the key in anything under `web/`, or in a `VITE_`-prefixed variable: Vite inlines those into the JavaScript bundle, where anyone who opens the page can read them.
 
-Other scripts: `npm test` (protocol test, no credentials needed), `npm run typecheck`, `npm run build`.
+Other scripts: `npm test` (protocol, roles, auth and persistence tests - no credentials needed), `npm run typecheck`, `npm run build`, `npm run clean:workspace`.
 
 ## Sharing a link with other people
 
@@ -79,9 +82,19 @@ It prints a `https://<random-words>.trycloudflare.com` URL that anyone can open.
 WebSockets work over it, so live streaming, interrupts and shared approvals all behave exactly as they do locally.
 Stop the tunnel with `Ctrl+C`; the URL dies with it, and a new one is issued each time.
 
-> The link is unauthenticated by design in this prototype.
-> Anyone who has it can spend your API credits and approve the agent's `write_file` calls, which land in `workspace/<session-id>` inside this project.
-> Hand it out for a test, then stop the tunnel.
+> Without `ACCESS_CODE`, anyone who has the link can spend your API credits and approve the agent's `write_file` calls, which land in `workspace/<session-id>` inside this project.
+> Set a code before handing the link out, and stop the tunnel when you're done.
+
+## Features
+
+| | |
+| --- | --- |
+| **Join screen** | Pick your name, colour, and whether you join as a participant or an observer. See who is already inside before you appear. |
+| **Roles** | Observers get the full live stream but cannot send, interrupt, or approve. Anyone can switch, so this is a UX affordance, not a security boundary. |
+| **Access code** | Set `ACCESS_CODE` and both the API and the WebSocket require it. This is the only real gate. |
+| **Persistence** | Sessions survive a restart. Transcripts, the model conversation, settings, and the roster are written to `data/sessions/`. |
+| **Workspace panel** | Everything the agent has written, in one place: list, read, download. Updates live as it writes. |
+| **Agent settings** | Per-session model, web search, and extra instructions. Changes are refused while the agent is running. |
 
 ## What is actually multiplayer here
 
@@ -104,7 +117,9 @@ The transcript records the decision and who made it.
 A client joining fresh gets a snapshot; a client that dropped its socket reconnects with the last sequence it saw and receives exactly the events it missed.
 Closing a laptop mid-run costs nothing, which matters for sessions that run for hours.
 
-**The workspace is shared.** Files the agent writes go to a per-session directory and are described to the agent as the group's surface, so results land somewhere everyone can look rather than scrolling away in chat.
+**The workspace is shared.** Files the agent writes go to a per-session directory and are described to the agent as the group's surface, so results land somewhere everyone can look rather than scrolling away in chat. The Files panel lists them all.
+
+**Settings are shared too.** Changing the model or the session instructions is an act everyone sees: it is written into the transcript with who did it, and it is refused mid-turn because switching discards the prompt cache the conversation has built up.
 
 ## How it fits together
 
@@ -127,6 +142,9 @@ That is what lets two people act on one running agent without either of them hol
 | `server/session.ts` | Session state, the agent loop, queueing, interrupts, approvals, event log |
 | `server/agent.ts` | The Anthropic streaming driver and the mock that stands in for it |
 | `server/tools.ts` | Tools and the per-session workspace, including which ones need approval |
+| `server/turn.ts` | One agent turn: streaming, tool execution, approval waiting, interrupt handling |
+| `server/store.ts` | Session persistence: debounced JSON per session, flushed on exit |
+| `server/workspace.ts` | The single path-traversal guard, shared by the tools and the file API |
 | `web/useSession.ts` | Socket client: snapshot, deltas, reconnect from a cursor |
 
 ## Model configuration
@@ -138,8 +156,9 @@ The system prompt tells the agent it is in a shared session, that user messages 
 
 This is a prototype, and the following are deliberate omissions rather than oversights.
 
-- Sessions live in memory. Restarting the server clears them.
-- No authentication. Anyone with the URL is a full participant, including for tool approvals.
+- Roles are not enforced against a determined user: anyone can switch their own. `ACCESS_CODE` is the only real gate, and it is all-or-nothing.
+- One process. State is in memory and mirrored to disk, so it does not scale horizontally.
 - The event log keeps the last 1000 events per session, so a client offline for a very long run resyncs with a snapshot instead of a replay.
+- `data/` and `workspace/` grow without bound. `npm run clean:workspace` removes both.
 - The workspace is guarded against path traversal but is not a sandbox. It is not safe to point at untrusted input as-is.
 - One shared driver for all sessions, and no per-session rate limiting.

@@ -2,11 +2,15 @@
 import "./env.ts";
 
 import http from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { WebSocketServer } from "ws";
 
-import type { ClientEvent } from "../shared/protocol.ts";
+import type { ClientEvent, Role } from "../shared/protocol.ts";
+import { ACCESS_CODE } from "./env.ts";
 import { Hub } from "./hub.ts";
+import * as store from "./store.ts";
 import { hasBuild, serveStatic } from "./static.ts";
+import { listWorkspace, readWorkspaceFile } from "./workspace.ts";
 
 // In dev the dev script sets SERVER_PORT explicitly, because `PORT` there
 // belongs to Vite. In production this is the only server, and `PORT` is what
@@ -16,7 +20,16 @@ const PORT = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? "0.0.0.0";
 const hub = new Hub();
 
-const server = http.createServer((req, res) => {
+/** Constant-time compare, so the code can't be recovered by timing the response. */
+function codeMatches(candidate: string | null | undefined): boolean {
+  if (!ACCESS_CODE) return true;
+  if (!candidate) return false;
+  const a = Buffer.from(candidate);
+  const b = Buffer.from(ACCESS_CODE);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
 
   const json = (status: number, body: unknown) => {
@@ -28,16 +41,55 @@ const server = http.createServer((req, res) => {
     res.end(payload);
   };
 
-  if (url.pathname === "/api/sessions" && req.method === "GET") {
+  // Unauthenticated on purpose: the client needs to know whether to show the
+  // code screen. It reveals that a code exists, never the code itself.
+  if (url.pathname === "/api/config") {
     return json(200, {
+      authRequired: Boolean(ACCESS_CODE),
       mock: hub.mock,
-      model: hub.model,
-      sessions: hub.list().map((s) => s.summary()),
+      models: hub.models,
+      defaultModel: hub.defaultModel,
     });
   }
 
-  if (url.pathname === "/api/sessions" && req.method === "POST") {
-    return json(201, hub.create().summary());
+  if (url.pathname.startsWith("/api/")) {
+    const supplied =
+      (req.headers["x-access-code"] as string | undefined) ?? url.searchParams.get("code");
+    if (!codeMatches(supplied)) return json(401, { error: "access code required" });
+
+    if (url.pathname === "/api/sessions" && req.method === "GET") {
+      return json(200, { mock: hub.mock, sessions: hub.list().map((s) => s.summary()) });
+    }
+    if (url.pathname === "/api/sessions" && req.method === "POST") {
+      return json(201, hub.create().summary());
+    }
+
+    // /api/sessions/:id, /api/sessions/:id/files, /api/sessions/:id/files/<path>
+    const parts = url.pathname.split("/").filter(Boolean); // ["api","sessions",id,...]
+    if (parts[0] === "api" && parts[1] === "sessions" && parts[2]) {
+      const session = hub.get(parts[2]);
+      if (!session) return json(404, { error: "no such session" });
+
+      if (parts.length === 3) return json(200, session.summary());
+
+      if (parts[3] === "files") {
+        if (parts.length === 4) return json(200, { files: await listWorkspace(session.id) });
+        // The path guard lives in workspace.ts, so traversal is rejected in one
+        // place rather than re-checked here.
+        const rel = parts.slice(4).map(decodeURIComponent).join("/");
+        try {
+          const body = await readWorkspaceFile(session.id, rel);
+          res.writeHead(200, {
+            "content-type": "text/plain; charset=utf-8",
+            "content-length": Buffer.byteLength(body),
+          });
+          return res.end(body);
+        } catch (error) {
+          return json(404, { error: error instanceof Error ? error.message : "not found" });
+        }
+      }
+    }
+    return json(404, { error: "not found" });
   }
 
   if (serveStatic(req, res, url.pathname)) return;
@@ -61,8 +113,19 @@ wss.on("connection", (socket) => {
     // The first frame must be `hello`; everything else is refused until then.
     if (event.t === "hello") {
       if (session) return;
+      if (!codeMatches(event.code)) {
+        socket.close(4001, "access code required");
+        return;
+      }
+      const role: Role = event.role === "observer" ? "observer" : "participant";
       session = hub.getOrCreate(event.sessionId);
-      participantId = session.attach(socket, event.name, event.participantId, event.since).id;
+      participantId = session.attach(socket, {
+        name: (event.name || "Guest").slice(0, 32),
+        color: Number(event.color) || 0,
+        role,
+        participantId: event.participantId,
+        since: event.since,
+      }).id;
       return;
     }
     if (!session || !participantId) return;
@@ -84,7 +147,13 @@ wss.on("connection", (socket) => {
         session.decide(participantId, event.entryId, event.approve);
         break;
       case "rename":
-        session.rename(participantId, event.name);
+        session.rename(participantId, event.name, event.color);
+        break;
+      case "setRole":
+        session.setRole(participantId, event.role);
+        break;
+      case "setConfig":
+        session.setConfig(participantId, event.config);
         break;
     }
   });
@@ -104,11 +173,25 @@ const onListenError = (error: NodeJS.ErrnoException) => {
 server.on("error", onListenError);
 wss.on("error", onListenError);
 
+// Persistence is debounced, so a pending write has to be flushed on the way out
+// or the last few seconds of a conversation are lost on Ctrl+C.
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    store.flushAll();
+    process.exit(0);
+  });
+}
+
 server.listen(PORT, HOST, () => {
   console.log(`[server] multiplayergpt listening on http://localhost:${PORT}`);
   console.log(
     hasBuild
       ? "[server] serving the built client from dist/ - this port is all you need to share"
       : "[server] no dist/ build found; expecting the Vite dev server to serve the client",
+  );
+  console.log(
+    ACCESS_CODE
+      ? "[server] ACCESS_CODE is set - visitors must enter it to join"
+      : "[server] ACCESS_CODE is not set - anyone with the URL can join and spend your API credits",
   );
 });

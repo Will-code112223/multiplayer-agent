@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { TOOL_DEFINITIONS } from "./tools.ts";
+import type { SessionConfig } from "../shared/protocol.ts";
+import type { ToolDef } from "./tools.ts";
 
 /**
  * The agent driver: one turn of the model, streamed, interruptible.
@@ -8,9 +9,22 @@ import { TOOL_DEFINITIONS } from "./tools.ts";
  * and a scripted mock used when no credentials are present. The mock exists so
  * the multiplayer mechanics (streaming to many viewers, interrupting, steering,
  * queueing, shared tool approval) can be exercised end to end with zero setup.
+ *
+ * Model and system prompt are per request, not per driver: a session can retune
+ * them between turns, and one client instance serves every session because the
+ * Anthropic client is stateless per call.
  */
 
-export const MODEL = "claude-opus-5";
+export const DEFAULT_MODEL = "claude-opus-5";
+
+/** Models `setConfig` will accept. An allowlist, so a client cannot bill arbitrary ids. */
+export const MODELS = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"] as const;
+
+export const DEFAULT_CONFIG: SessionConfig = {
+  model: DEFAULT_MODEL,
+  systemPromptExtra: "",
+  webSearch: false,
+};
 
 export const SYSTEM_PROMPT = `You are a shared agent in a multiplayer session. Several people watch this
 conversation at the same time. Any of them can send you a message, interrupt you mid-task, redirect
@@ -27,6 +41,12 @@ Because the session is shared:
 Keep responses focused and brief so they stay readable to people who are skimming. Lead with the
 outcome, then supporting detail. Deliver what was asked at the scope intended: make routine judgment
 calls yourself, and check in only when different readings would lead to materially different work.`;
+
+/** Base prompt plus whatever the group has added for this session. */
+export function systemPromptFor(config: SessionConfig): string {
+  const extra = config.systemPromptExtra.trim();
+  return extra ? `${SYSTEM_PROMPT}\n\nAdditional instructions for this session:\n${extra}` : SYSTEM_PROMPT;
+}
 
 export interface ToolUse {
   id: string;
@@ -48,14 +68,16 @@ export interface TurnHandlers {
   onThinking(delta: string): void;
 }
 
+export interface TurnRequest {
+  messages: Anthropic.MessageParam[];
+  model: string;
+  system: string;
+  tools: ToolDef[];
+}
+
 export interface AgentDriver {
   readonly mock: boolean;
-  readonly model: string;
-  runTurn(
-    messages: Anthropic.MessageParam[],
-    handlers: TurnHandlers,
-    signal: AbortSignal,
-  ): Promise<TurnOutcome>;
+  runTurn(req: TurnRequest, handlers: TurnHandlers, signal: AbortSignal): Promise<TurnOutcome>;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,11 +86,10 @@ export interface AgentDriver {
 
 class AnthropicDriver implements AgentDriver {
   readonly mock = false;
-  readonly model = MODEL;
   private client = new Anthropic();
 
   async runTurn(
-    messages: Anthropic.MessageParam[],
+    req: TurnRequest,
     handlers: TurnHandlers,
     signal: AbortSignal,
   ): Promise<TurnOutcome> {
@@ -76,15 +97,15 @@ class AnthropicDriver implements AgentDriver {
 
     const stream = this.client.messages.stream(
       {
-        model: MODEL,
+        model: req.model,
         max_tokens: 32000,
         // Summarized thinking is the point in a shared session: spectators can
         // watch the agent reason instead of staring at a spinner.
         thinking: { type: "adaptive", display: "summarized" },
         output_config: { effort: "high" },
-        system: SYSTEM_PROMPT,
-        tools: TOOL_DEFINITIONS,
-        messages,
+        system: req.system,
+        tools: req.tools,
+        messages: req.messages,
       },
       { signal },
     );
@@ -128,7 +149,7 @@ class AnthropicDriver implements AgentDriver {
 
 const MOCK_THINKING = [
   "Reading the request and checking what the group already has in the workspace.",
-  "Two people are in this session, so I should be explicit about whose request I am acting on.",
+  "Several people are in this session, so I should be explicit about whose request I am acting on.",
   "Sketching the shape of the answer before writing it out.",
 ];
 
@@ -174,11 +195,10 @@ function endsWithToolResult(messages: Anthropic.MessageParam[]): boolean {
 
 class MockDriver implements AgentDriver {
   readonly mock = true;
-  readonly model = "mock-agent";
   private counter = 0;
 
   async runTurn(
-    messages: Anthropic.MessageParam[],
+    req: TurnRequest,
     handlers: TurnHandlers,
     signal: AbortSignal,
   ): Promise<TurnOutcome> {
@@ -192,8 +212,8 @@ class MockDriver implements AgentDriver {
     };
 
     try {
-      const wrappingUp = endsWithToolResult(messages);
-      const ask = lastUserText(messages).replace(/^\[[^\]]+\]\s*/, "").trim();
+      const wrappingUp = endsWithToolResult(req.messages);
+      const ask = lastUserText(req.messages).replace(/^\[[^\]]+\]\s*/, "").trim();
 
       if (wrappingUp) {
         await emit(
@@ -201,7 +221,12 @@ class MockDriver implements AgentDriver {
             "Tell me what to change and I'll revise it in place.",
           22,
         );
-        return { type: "complete", content: [{ type: "text", text: partialText }], toolUses: [], stopReason: "end_turn" };
+        return {
+          type: "complete",
+          content: [{ type: "text", text: partialText }],
+          toolUses: [],
+          stopReason: "end_turn",
+        };
       }
 
       for (const line of MOCK_THINKING.slice(0, 2 + (this.counter % 2))) {
@@ -222,7 +247,12 @@ class MockDriver implements AgentDriver {
       );
 
       if (!proposeWrite) {
-        return { type: "complete", content: [{ type: "text", text: partialText }], toolUses: [], stopReason: "end_turn" };
+        return {
+          type: "complete",
+          content: [{ type: "text", text: partialText }],
+          toolUses: [],
+          stopReason: "end_turn",
+        };
       }
 
       this.counter += 1;
@@ -231,7 +261,7 @@ class MockDriver implements AgentDriver {
         name: "write_file",
         input: {
           path: `notes-${this.counter}.md`,
-          content: `# Session notes ${this.counter}\n\nRequest: ${ask}\n\n- Captured at ${new Date().toISOString()}\n- Written by the shared agent, visible to every participant.\n`,
+          content: `# Session notes ${this.counter}\n\nRequest: ${ask}\n\n- Captured at ${new Date().toISOString()}\n- Model setting: ${req.model}\n- Written by the shared agent, visible to every participant.\n`,
         },
       };
 
@@ -258,12 +288,10 @@ export function createDriver(): AgentDriver {
   if (!hasKey) {
     console.log(
       "[agent] No ANTHROPIC_API_KEY found - running the scripted mock agent.\n" +
-        "        Set ANTHROPIC_API_KEY and restart to use " +
-        MODEL +
-        ".",
+        `        Set ANTHROPIC_API_KEY and restart to use ${DEFAULT_MODEL}.`,
     );
     return new MockDriver();
   }
-  console.log(`[agent] Using ${MODEL} via the Anthropic API.`);
+  console.log(`[agent] Using the Anthropic API (default model ${DEFAULT_MODEL}).`);
   return new AnthropicDriver();
 }

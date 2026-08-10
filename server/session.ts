@@ -3,21 +3,25 @@ import type { WebSocket } from "ws";
 import type Anthropic from "@anthropic-ai/sdk";
 
 import type {
-  AgentEntry,
   Entry,
   Participant,
+  Role,
   RunState,
   ServerEvent,
+  SessionConfig,
   SessionSnapshot,
   SessionSummary,
-  ToolEntry,
   UserEntry,
+  WorkspaceFile,
 } from "../shared/protocol.ts";
 import type { AgentDriver } from "./agent.ts";
-import { TOOLS } from "./tools.ts";
+import { DEFAULT_CONFIG, MODELS } from "./agent.ts";
+import * as store from "./store.ts";
+import type { PersistedSession } from "./store.ts";
+import { runAgentTurn } from "./turn.ts";
+import type { Decision, PendingMessage, TurnContext } from "./turn.ts";
+import { listWorkspace } from "./workspace.ts";
 
-/** Cap on tool round-trips inside one turn, so a loop can't run away. */
-const MAX_TOOL_ITERATIONS = 12;
 /** How many past events to retain for reconnecting clients. */
 const EVENT_LOG_LIMIT = 1000;
 /** How long a disconnected participant stays visible before being dropped. */
@@ -28,13 +32,13 @@ interface Connection {
   participantId: string;
 }
 
-interface PendingMessage {
-  entry: UserEntry;
-  author: Participant;
-  text: string;
+export interface JoinRequest {
+  name: string;
+  color: number;
+  role: Role;
+  participantId?: string;
+  since?: number;
 }
-
-type Decision = "approve" | "deny" | "interrupted";
 
 /**
  * One shared agent session.
@@ -46,9 +50,10 @@ type Decision = "approve" | "deny" | "interrupted";
  */
 export class Session {
   readonly id: string;
-  readonly createdAt = Date.now();
+  readonly createdAt: number;
   title = "Untitled session";
 
+  private driver: AgentDriver;
   private entries: Entry[] = [];
   private entryIndex = new Map<string, Entry>();
   private participants = new Map<string, Participant>();
@@ -61,39 +66,73 @@ export class Session {
   private pending: PendingMessage[] = [];
   private pendingDecisions = new Map<string, (d: Decision) => void>();
 
-  private run: RunState = { status: "idle", queued: 0 };
+  private config: SessionConfig = { ...DEFAULT_CONFIG };
+  private files: WorkspaceFile[] = [];
+
+  private runState: RunState = { status: "idle", queued: 0 };
   private driving = false;
   private abort: AbortController | null = null;
-  private interruptedBy: Participant | undefined;
+  private interrupter: Participant | undefined;
 
   private log: ServerEvent[] = [];
   private seq = 0;
   private nextEntryNumber = 0;
   private nextColor = 0;
 
-  private driver: AgentDriver;
-
   // Written out longhand rather than as constructor parameter properties: those
   // need code generation, and Node's built-in TypeScript support only strips
   // types. Keeping to strippable syntax is what lets `npm start` run the server
   // with plain `node`, no build step and no dev dependencies.
-  constructor(id: string, driver: AgentDriver) {
+  constructor(id: string, driver: AgentDriver, restored?: PersistedSession) {
     this.id = id;
     this.driver = driver;
+    this.createdAt = restored?.createdAt ?? Date.now();
+
+    if (restored) {
+      this.title = restored.title;
+      this.entries = restored.entries;
+      this.messages = restored.messages;
+      this.config = { ...DEFAULT_CONFIG, ...restored.config };
+      for (const entry of this.entries) this.entryIndex.set(entry.id, entry);
+      for (const person of restored.roster) this.participants.set(person.id, person);
+      // Entry ids must not collide with restored ones.
+      this.nextEntryNumber =
+        Math.max(0, ...this.entries.map((e) => Number(e.id.slice(1)) + 1 || 0)) || 0;
+      this.nextColor = restored.roster.length;
+    }
+    void this.refreshFiles();
+  }
+
+  // -------------------------------------------------------------------------
+  // Persistence
+  // -------------------------------------------------------------------------
+
+  private persist(): void {
+    store.scheduleSave({
+      id: this.id,
+      title: this.title,
+      createdAt: this.createdAt,
+      entries: this.entries,
+      messages: this.messages,
+      config: this.config,
+      // Presence is a runtime fact; store the roster as offline.
+      roster: [...this.participants.values()].map((p) => ({ ...p, online: false })),
+    });
   }
 
   // -------------------------------------------------------------------------
   // Presence and connections
   // -------------------------------------------------------------------------
 
-  attach(socket: WebSocket, name: string, participantId?: string, since?: number): Participant {
-    const existing = participantId ? this.participants.get(participantId) : undefined;
+  attach(socket: WebSocket, req: JoinRequest): Participant {
+    const existing = req.participantId ? this.participants.get(req.participantId) : undefined;
     const participant: Participant = existing
-      ? { ...existing, name, online: true }
+      ? { ...existing, name: req.name, color: req.color, role: req.role, online: true }
       : {
-          id: participantId ?? randomUUID(),
-          name,
-          color: this.nextColor++ % 8,
+          id: req.participantId ?? randomUUID(),
+          name: req.name,
+          color: Number.isInteger(req.color) ? ((req.color % 8) + 8) % 8 : this.nextColor++ % 8,
+          role: req.role,
           joinedAt: Date.now(),
           online: true,
         };
@@ -114,17 +153,11 @@ export class Session {
     // send nothing at all and strand the client on an empty transcript.
     const oldest = this.log[0]?.seq;
     const servable =
-      since !== undefined && oldest !== undefined && since >= oldest - 1 && since <= this.seq;
+      req.since !== undefined && oldest !== undefined && req.since >= oldest - 1 && req.since <= this.seq;
     if (servable) {
-      const missed = this.log.filter((e) => e.seq > since);
-      for (const event of missed) this.send(socket, event);
+      for (const event of this.log.filter((e) => e.seq > req.since!)) this.send(socket, event);
     } else {
-      this.send(socket, {
-        seq: this.seq,
-        t: "snapshot",
-        you: participant,
-        session: this.snapshot(),
-      });
+      this.send(socket, { seq: this.seq, t: "snapshot", you: participant, session: this.snapshot() });
     }
 
     if (!existing) {
@@ -132,7 +165,7 @@ export class Session {
         kind: "system",
         id: this.newEntryId(),
         at: Date.now(),
-        text: `${participant.name} joined the session.`,
+        text: `${participant.name} joined${participant.role === "observer" ? " as an observer" : ""}.`,
       });
     }
     this.broadcastPresence();
@@ -168,19 +201,32 @@ export class Session {
     this.dropTimers.set(connection.participantId, timer);
   }
 
-  rename(participantId: string, name: string): void {
+  rename(participantId: string, name: string, color?: number): void {
     const participant = this.participants.get(participantId);
     if (!participant || !name.trim()) return;
-    this.participants.set(participantId, { ...participant, name: name.trim().slice(0, 32) });
+    this.participants.set(participantId, {
+      ...participant,
+      name: name.trim().slice(0, 32),
+      color: Number.isInteger(color) ? ((color! % 8) + 8) % 8 : participant.color,
+    });
+    this.broadcastPresence();
+  }
+
+  setRole(participantId: string, role: Role): void {
+    const participant = this.participants.get(participantId);
+    if (!participant || participant.role === role) return;
+    this.participants.set(participantId, { ...participant, role });
+    this.addEntry({
+      kind: "system",
+      id: this.newEntryId(),
+      at: Date.now(),
+      text: `${participant.name} is now ${role === "observer" ? "observing" : "participating"}.`,
+    });
     this.broadcastPresence();
   }
 
   setTyping(participantId: string, typing: boolean): void {
     this.emit({ seq: 0, t: "typing", participantId, typing });
-  }
-
-  get participantCount(): number {
-    return this.participants.size;
   }
 
   summary(): SessionSummary {
@@ -189,7 +235,7 @@ export class Session {
       title: this.title,
       createdAt: this.createdAt,
       participants: [...this.participants.values()],
-      status: this.run.status,
+      status: this.runState.status,
       entries: this.entries.length,
     };
   }
@@ -201,9 +247,11 @@ export class Session {
       createdAt: this.createdAt,
       entries: this.entries,
       participants: [...this.participants.values()],
-      run: this.run,
+      run: this.runState,
+      config: this.config,
+      files: this.files,
       mock: this.driver.mock,
-      model: this.driver.model,
+      models: [...MODELS],
     };
   }
 
@@ -211,12 +259,32 @@ export class Session {
   // Intents
   // -------------------------------------------------------------------------
 
+  /**
+   * Observers are refused here rather than only in the UI.
+   *
+   * This is defence in depth for a nicer interface, not a security boundary:
+   * anyone can flip their own role. The access code is the only real gate.
+   */
+  private actor(participantId: string, socketAction: string): Participant | null {
+    const participant = this.participants.get(participantId);
+    if (!participant) return null;
+    if (participant.role === "observer") {
+      this.sendToParticipant(participantId, {
+        seq: this.seq,
+        t: "denied",
+        reason: `Observers cannot ${socketAction}. Switch to participant to join in.`,
+      });
+      return null;
+    }
+    return participant;
+  }
+
   say(participantId: string, text: string): void {
-    const author = this.participants.get(participantId);
+    const author = this.actor(participantId, "send messages");
     const body = text.trim();
     if (!author || !body) return;
 
-    const busy = this.run.status !== "idle";
+    const busy = this.runState.status !== "idle";
     const entry: UserEntry = {
       kind: "user",
       id: this.newEntryId(),
@@ -233,22 +301,21 @@ export class Session {
       this.emit({ seq: 0, t: "title", title: this.title });
     }
 
-    if (busy) this.setRun({ ...this.run, queued: this.pending.length });
+    if (busy) this.patchRun({ queued: this.pending.length });
     else void this.drive();
   }
 
   /** Interrupt whatever is running and redirect in one action. */
   steer(participantId: string, text: string): void {
-    const author = this.participants.get(participantId);
-    if (!author) return;
-    if (this.run.status !== "idle") this.interrupt(participantId, { silent: true });
+    if (!this.actor(participantId, "steer the agent")) return;
+    if (this.runState.status !== "idle") this.interrupt(participantId, { silent: true });
     this.say(participantId, text);
   }
 
   interrupt(participantId: string, opts: { silent?: boolean } = {}): void {
-    const by = this.participants.get(participantId);
-    if (!by || this.run.status === "idle" || !this.abort) return;
-    this.interruptedBy = by;
+    const by = this.actor(participantId, "interrupt the agent");
+    if (!by || this.runState.status === "idle" || !this.abort) return;
+    this.interrupter = by;
     this.abort.abort();
     if (!opts.silent) {
       this.addEntry({
@@ -261,7 +328,7 @@ export class Session {
   }
 
   decide(participantId: string, entryId: string, approve: boolean): void {
-    const by = this.participants.get(participantId);
+    const by = this.actor(participantId, "approve tool calls");
     const resolve = this.pendingDecisions.get(entryId);
     const entry = this.entryIndex.get(entryId);
     if (!by || !resolve || !entry || entry.kind !== "tool") return;
@@ -271,9 +338,88 @@ export class Session {
     resolve(approve ? "approve" : "deny");
   }
 
+  /**
+   * Retune the agent for this session.
+   *
+   * Refused while a turn is in flight: a model or prompt change mid-turn would
+   * apply to a conversation the previous model was halfway through, and it
+   * discards the prompt cache built up so far. Idle-only keeps the cost visible
+   * and the transcript honest about which model produced which answer.
+   */
+  setConfig(participantId: string, patch: Partial<SessionConfig>): void {
+    const by = this.actor(participantId, "change the agent settings");
+    if (!by) return;
+
+    if (this.runState.status !== "idle") {
+      this.sendToParticipant(participantId, {
+        seq: this.seq,
+        t: "denied",
+        reason: "Settings can only change while the agent is idle. Stop it first.",
+      });
+      return;
+    }
+
+    const next: SessionConfig = { ...this.config };
+    const changes: string[] = [];
+
+    if (patch.model !== undefined && patch.model !== this.config.model) {
+      if (!(MODELS as readonly string[]).includes(patch.model)) {
+        this.sendToParticipant(participantId, {
+          seq: this.seq,
+          t: "denied",
+          reason: `Unknown model: ${patch.model}`,
+        });
+        return;
+      }
+      next.model = patch.model;
+      changes.push(`model to ${patch.model} (this resets the prompt cache)`);
+    }
+    if (patch.webSearch !== undefined && patch.webSearch !== this.config.webSearch) {
+      next.webSearch = patch.webSearch;
+      changes.push(`web search ${patch.webSearch ? "on" : "off"}`);
+    }
+    if (
+      patch.systemPromptExtra !== undefined &&
+      patch.systemPromptExtra !== this.config.systemPromptExtra
+    ) {
+      next.systemPromptExtra = patch.systemPromptExtra.slice(0, 4000);
+      changes.push("the session instructions");
+    }
+    if (changes.length === 0) return;
+
+    this.config = next;
+    this.emit({ seq: 0, t: "config", config: this.config });
+    this.addEntry({
+      kind: "system",
+      id: this.newEntryId(),
+      at: Date.now(),
+      text: `${by.name} changed ${changes.join(", ")}.`,
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Agent loop
   // -------------------------------------------------------------------------
+
+  private turnContext(): TurnContext {
+    return {
+      sessionId: this.id,
+      driver: this.driver,
+      config: () => this.config,
+      messages: this.messages,
+      newEntryId: () => this.newEntryId(),
+      addEntry: (entry) => this.addEntry(entry),
+      setEntry: (entry) => this.setEntry(entry),
+      emitDelta: (id, channel, text) => this.emit({ seq: 0, t: "agent.delta", id, channel, text }),
+      run: () => this.runState,
+      patchRun: (patch) => this.patchRun(patch),
+      drainQueue: () => this.pending.splice(0),
+      queueLength: () => this.pending.length,
+      interruptedBy: () => this.interrupter,
+      awaitDecision: (entryId, signal) => this.awaitDecision(entryId, signal),
+      workspaceChanged: () => void this.refreshFiles(),
+    };
+  }
 
   private async drive(): Promise<void> {
     if (this.driving) return;
@@ -288,7 +434,11 @@ export class Session {
           startedAt: Date.now(),
           queued: 0,
         });
-        await this.runTurn();
+
+        const abort = new AbortController();
+        this.abort = abort;
+        this.interrupter = undefined;
+        await runAgentTurn(this.turnContext(), abort.signal);
       }
     } catch (error) {
       this.addEntry({
@@ -313,173 +463,6 @@ export class Session {
     this.messages.push({ role: "user", content: `[${item.author.name}] ${item.text}` });
   }
 
-  private async runTurn(): Promise<void> {
-    const abort = new AbortController();
-    this.abort = abort;
-    this.interruptedBy = undefined;
-
-    for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
-      const agentEntry: AgentEntry = {
-        kind: "agent",
-        id: this.newEntryId(),
-        at: Date.now(),
-        text: "",
-        thinking: "",
-        status: "streaming",
-      };
-      this.addEntry(agentEntry);
-
-      let outcome;
-      try {
-        outcome = await this.driver.runTurn(
-          this.messages,
-          {
-            onText: (delta) => {
-              agentEntry.text += delta;
-              this.emit({ seq: 0, t: "agent.delta", id: agentEntry.id, channel: "text", text: delta });
-            },
-            onThinking: (delta) => {
-              agentEntry.thinking += delta;
-              this.emit({ seq: 0, t: "agent.delta", id: agentEntry.id, channel: "thinking", text: delta });
-            },
-          },
-          abort.signal,
-        );
-      } catch (error) {
-        agentEntry.status = "error";
-        agentEntry.error = error instanceof Error ? error.message : String(error);
-        this.setEntry(agentEntry);
-        return;
-      }
-
-      if (outcome.type === "interrupted") {
-        agentEntry.status = "interrupted";
-        agentEntry.interruptedBy = this.interruptedBy;
-        this.setEntry(agentEntry);
-        // Keep the partial answer in history so the conversation stays coherent.
-        // Thinking blocks are dropped: an aborted stream never produced signed ones.
-        if (outcome.partialText.trim()) {
-          this.messages.push({ role: "assistant", content: outcome.partialText });
-        }
-        return;
-      }
-
-      agentEntry.status = "done";
-      this.setEntry(agentEntry);
-      this.messages.push({ role: "assistant", content: outcome.content });
-
-      if (outcome.toolUses.length === 0) return;
-
-      const results = await this.executeTools(outcome.toolUses, abort.signal);
-
-      // Tool results must be the very next user turn - a separate user message
-      // between tool_use and tool_result is rejected - so this is the earliest
-      // legal point to deliver anything queued during the turn.
-      //
-      // Unless we were interrupted: then the queue stays put, so the caller's
-      // loop starts a fresh turn for it instead of burying it in a turn that is
-      // already being torn down.
-      const content: Anthropic.ContentBlockParam[] = [...results];
-      if (!abort.signal.aborted) {
-        for (const item of this.pending.splice(0)) {
-          item.entry.queued = false;
-          this.setEntry(item.entry);
-          content.push({ type: "text", text: `[${item.author.name}] ${item.text}` });
-        }
-      }
-      this.messages.push({ role: "user", content });
-      this.setRun({ ...this.run, queued: this.pending.length });
-
-      if (abort.signal.aborted) return;
-    }
-
-    this.addEntry({
-      kind: "system",
-      id: this.newEntryId(),
-      at: Date.now(),
-      text: `Stopped after ${MAX_TOOL_ITERATIONS} tool rounds.`,
-    });
-  }
-
-  /**
-   * Run every requested tool, producing exactly one result per tool_use.
-   *
-   * The one-to-one guarantee matters even when the run is interrupted midway:
-   * an assistant turn with an unanswered tool_use makes the next request invalid.
-   */
-  private async executeTools(
-    toolUses: { id: string; name: string; input: Record<string, unknown> }[],
-    signal: AbortSignal,
-  ): Promise<Anthropic.ToolResultBlockParam[]> {
-    const results: Anthropic.ToolResultBlockParam[] = [];
-
-    for (const use of toolUses) {
-      const entry: ToolEntry = {
-        kind: "tool",
-        id: this.newEntryId(),
-        at: Date.now(),
-        name: use.name,
-        input: use.input,
-        status: "running",
-      };
-
-      const spec = TOOLS[use.name];
-      if (!spec) {
-        entry.status = "error";
-        entry.output = `Unknown tool: ${use.name}`;
-        this.addEntry(entry);
-        results.push({ type: "tool_result", tool_use_id: use.id, content: entry.output, is_error: true });
-        continue;
-      }
-
-      if (signal.aborted) {
-        entry.status = "denied";
-        entry.output = "Interrupted before this tool ran.";
-        this.addEntry(entry);
-        results.push({ type: "tool_result", tool_use_id: use.id, content: entry.output, is_error: true });
-        continue;
-      }
-
-      if (spec.requiresApproval) {
-        entry.status = "pending-approval";
-        this.addEntry(entry);
-        this.setRun({ ...this.run, status: "awaiting-approval" });
-
-        const decision = await this.awaitDecision(entry.id, signal);
-        this.setRun({ ...this.run, status: "running" });
-
-        if (decision !== "approve") {
-          entry.status = "denied";
-          entry.output =
-            decision === "interrupted"
-              ? "Interrupted before anyone approved."
-              : `Denied by ${entry.decidedBy?.name ?? "a participant"}.`;
-          this.setEntry(entry);
-          results.push({ type: "tool_result", tool_use_id: use.id, content: entry.output, is_error: true });
-          continue;
-        }
-        entry.status = "running";
-        this.setEntry(entry);
-      } else {
-        this.addEntry(entry);
-      }
-
-      try {
-        const output = await spec.run(use.input, this.id);
-        entry.status = "ok";
-        entry.output = output.length > 4000 ? `${output.slice(0, 4000)}\n... (truncated)` : output;
-        results.push({ type: "tool_result", tool_use_id: use.id, content: output.slice(0, 100_000) });
-      } catch (error) {
-        entry.status = "error";
-        entry.output = error instanceof Error ? error.message : String(error);
-        results.push({ type: "tool_result", tool_use_id: use.id, content: entry.output, is_error: true });
-      }
-      this.setEntry(entry);
-    }
-
-    return results;
-  }
-
   private awaitDecision(entryId: string, signal: AbortSignal): Promise<Decision> {
     return new Promise<Decision>((resolve) => {
       if (signal.aborted) return resolve("interrupted");
@@ -494,6 +477,13 @@ export class Session {
     });
   }
 
+  private async refreshFiles(): Promise<void> {
+    const files = await listWorkspace(this.id);
+    const changed = JSON.stringify(files) !== JSON.stringify(this.files);
+    this.files = files;
+    if (changed) this.emit({ seq: 0, t: "files", files });
+  }
+
   // -------------------------------------------------------------------------
   // Event plumbing
   // -------------------------------------------------------------------------
@@ -506,20 +496,27 @@ export class Session {
     this.entries.push(entry);
     this.entryIndex.set(entry.id, entry);
     this.emit({ seq: 0, t: "entry.add", entry });
+    this.persist();
   }
 
   private setEntry(entry: Entry): void {
     this.entryIndex.set(entry.id, entry);
     this.emit({ seq: 0, t: "entry.set", entry });
+    this.persist();
   }
 
   private setRun(run: RunState): void {
-    this.run = run;
+    this.runState = run;
     this.emit({ seq: 0, t: "run", run });
+  }
+
+  private patchRun(patch: Partial<RunState>): void {
+    this.setRun({ ...this.runState, ...patch });
   }
 
   private broadcastPresence(): void {
     this.emit({ seq: 0, t: "presence", participants: [...this.participants.values()] });
+    this.persist();
   }
 
   private emit(event: ServerEvent): void {
@@ -528,9 +525,14 @@ export class Session {
     if (this.log.length > EVENT_LOG_LIMIT) this.log.splice(0, this.log.length - EVENT_LOG_LIMIT);
     const payload = JSON.stringify(stamped);
     for (const connection of this.connections) {
-      if (connection.socket.readyState === connection.socket.OPEN) {
-        connection.socket.send(payload);
-      }
+      if (connection.socket.readyState === connection.socket.OPEN) connection.socket.send(payload);
+    }
+  }
+
+  /** Sent to one person only, so it never enters the shared log or moves cursors. */
+  private sendToParticipant(participantId: string, event: ServerEvent): void {
+    for (const connection of this.connections) {
+      if (connection.participantId === participantId) this.send(connection.socket, event);
     }
   }
 

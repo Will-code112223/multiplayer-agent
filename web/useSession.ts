@@ -3,11 +3,15 @@ import type {
   ClientEvent,
   Entry,
   Participant,
+  Role,
   RunState,
   ServerEvent,
+  SessionConfig,
+  WorkspaceFile,
 } from "../shared/protocol.ts";
+import { loadCode } from "./api.ts";
 
-export type ConnectionState = "connecting" | "open" | "closed";
+export type ConnectionState = "connecting" | "open" | "closed" | "unauthorized";
 
 export interface SessionView {
   connection: ConnectionState;
@@ -16,16 +20,22 @@ export interface SessionView {
   entries: Entry[];
   participants: Participant[];
   run: RunState;
+  config: SessionConfig | null;
+  files: WorkspaceFile[];
   mock: boolean;
-  model: string;
+  models: string[];
   typing: Set<string>;
+  /** Last refusal from the server, shown as a transient toast. */
+  denied: string | null;
 }
 
 const IDENTITY_KEY = "mpgpt.identity";
 
-interface Identity {
+export interface Identity {
   participantId: string;
   name: string;
+  color: number;
+  role: Role;
 }
 
 const NAMES = [
@@ -33,8 +43,12 @@ const NAMES = [
   "Iris", "Jonas", "Kit", "Lena", "Milo", "Nova", "Otis", "Pia",
 ];
 
+export function randomName(): string {
+  return NAMES[Math.floor(Math.random() * NAMES.length)] ?? "Guest";
+}
+
 /**
- * `?as=Name` opts a tab into a per-tab identity.
+ * `?as=Name` opts a tab into a per-tab identity and skips the join screen.
  *
  * Without it, every tab in a browser shares one localStorage identity and so
  * shows up as the same person - which makes it impossible to try a multiplayer
@@ -48,20 +62,26 @@ function identityStore(): Storage {
   return forcedName() !== null ? sessionStorage : localStorage;
 }
 
-export function loadIdentity(): Identity {
+/** Null until the person has been through the join screen. */
+export function loadIdentity(): Identity | null {
   const forced = forcedName();
   try {
     const raw = identityStore().getItem(IDENTITY_KEY);
     if (raw) return JSON.parse(raw) as Identity;
   } catch {
-    // fall through to a fresh identity
+    // fall through
   }
-  const identity: Identity = {
-    participantId: crypto.randomUUID(),
-    name: forced?.trim() || NAMES[Math.floor(Math.random() * NAMES.length)] || "Guest",
-  };
-  saveIdentity(identity);
-  return identity;
+  if (forced !== null) {
+    const identity: Identity = {
+      participantId: crypto.randomUUID(),
+      name: forced.trim() || randomName(),
+      color: Math.floor(Math.random() * 8),
+      role: "participant",
+    };
+    saveIdentity(identity);
+    return identity;
+  }
+  return null;
 }
 
 export function saveIdentity(identity: Identity): void {
@@ -69,6 +89,14 @@ export function saveIdentity(identity: Identity): void {
     identityStore().setItem(IDENTITY_KEY, JSON.stringify(identity));
   } catch {
     // storage unavailable; identity lives only in memory for this page load
+  }
+}
+
+export function clearIdentity(): void {
+  try {
+    identityStore().removeItem(IDENTITY_KEY);
+  } catch {
+    // nothing to clear
   }
 }
 
@@ -82,22 +110,29 @@ const EMPTY_RUN: RunState = { status: "idle", queued: 0 };
  * costs nothing - which matters when a session may run for hours and people
  * close laptops in the middle of it.
  */
-export function useSession(sessionId: string | null): SessionView & {
-  send: (event: ClientEvent) => void;
-} {
+export function useSession(
+  sessionId: string | null,
+  identity: Identity | null,
+): SessionView & { send: (event: ClientEvent) => void } {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [me, setMe] = useState<Participant | null>(null);
   const [title, setTitle] = useState("Untitled session");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [run, setRun] = useState<RunState>(EMPTY_RUN);
+  const [config, setConfig] = useState<SessionConfig | null>(null);
+  const [files, setFiles] = useState<WorkspaceFile[]>([]);
   const [mock, setMock] = useState(false);
-  const [model, setModel] = useState("");
+  const [models, setModels] = useState<string[]>([]);
   const [typing, setTyping] = useState<Set<string>>(new Set());
+  const [denied, setDenied] = useState<string | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const seqRef = useRef<number>(-1);
   const typingTimers = useRef(new Map<string, number>());
+  // Read inside onopen, so a rename does not force a reconnect.
+  const identityRef = useRef(identity);
+  identityRef.current = identity;
 
   const send = useCallback((event: ClientEvent) => {
     const socket = socketRef.current;
@@ -105,7 +140,7 @@ export function useSession(sessionId: string | null): SessionView & {
   }, []);
 
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || !identity) return;
 
     let disposed = false;
     let retry = 0;
@@ -113,7 +148,7 @@ export function useSession(sessionId: string | null): SessionView & {
 
     const connect = () => {
       if (disposed) return;
-      setConnection(seqRef.current >= 0 ? "connecting" : "connecting");
+      setConnection("connecting");
 
       const url = new URL("/ws", location.href);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -123,12 +158,16 @@ export function useSession(sessionId: string | null): SessionView & {
       socket.onopen = () => {
         retry = 0;
         setConnection("open");
-        const identity = loadIdentity();
+        const who = identityRef.current;
+        if (!who) return;
         const hello: ClientEvent = {
           t: "hello",
           sessionId,
-          name: identity.name,
-          participantId: identity.participantId,
+          name: who.name,
+          color: who.color,
+          role: who.role,
+          participantId: who.participantId,
+          ...(loadCode() ? { code: loadCode() } : {}),
           ...(seqRef.current >= 0 ? { since: seqRef.current } : {}),
         };
         socket.send(JSON.stringify(hello));
@@ -140,8 +179,13 @@ export function useSession(sessionId: string | null): SessionView & {
         apply(event);
       };
 
-      socket.onclose = () => {
+      socket.onclose = (ev) => {
         if (disposed) return;
+        // 4001 is the server refusing the access code; retrying cannot help.
+        if (ev.code === 4001) {
+          setConnection("unauthorized");
+          return;
+        }
         setConnection("closed");
         retry += 1;
         reconnectTimer = window.setTimeout(connect, Math.min(500 * 2 ** (retry - 1), 4000));
@@ -156,17 +200,30 @@ export function useSession(sessionId: string | null): SessionView & {
           setEntries(event.session.entries);
           setParticipants(event.session.participants);
           setRun(event.session.run);
+          setConfig(event.session.config);
+          setFiles(event.session.files);
           setMock(event.session.mock);
-          setModel(event.session.model);
+          setModels(event.session.models);
           break;
         case "presence":
           setParticipants(event.participants);
+          setMe((prev) => event.participants.find((p) => p.id === prev?.id) ?? prev);
           break;
         case "title":
           setTitle(event.title);
           break;
         case "run":
           setRun(event.run);
+          break;
+        case "config":
+          setConfig(event.config);
+          break;
+        case "files":
+          setFiles(event.files);
+          break;
+        case "denied":
+          setDenied(event.reason);
+          window.setTimeout(() => setDenied(null), 4000);
           break;
         case "entry.add":
           setEntries((prev) => [...prev, event.entry]);
@@ -217,7 +274,10 @@ export function useSession(sessionId: string | null): SessionView & {
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [sessionId]);
+  }, [sessionId, identity !== null]);
 
-  return { connection, me, title, entries, participants, run, mock, model, typing, send };
+  return {
+    connection, me, title, entries, participants, run, config, files,
+    mock, models, typing, denied, send,
+  };
 }

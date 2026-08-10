@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
+import type { SessionConfig } from "../shared/protocol.ts";
+import { resolveInWorkspace } from "./workspace.ts";
 
 /**
  * Tools the shared agent can call.
@@ -11,38 +13,14 @@ import type Anthropic from "@anthropic-ai/sdk";
  * multiplayer primitive rather than a modal only the owner can see.
  */
 
-const WORKSPACE_ROOT = path.resolve(process.cwd(), "workspace");
+/** One entry of the `tools` array on a Messages request. */
+export type ToolDef = NonNullable<Anthropic.MessageCreateParams["tools"]>[number];
 
 export interface ToolSpec {
   definition: Anthropic.Tool;
   /** Tools with side effects pause the run until a participant decides. */
   requiresApproval: boolean;
   run(input: Record<string, unknown>, sessionId: string): Promise<string>;
-}
-
-export async function sessionWorkspace(sessionId: string): Promise<string> {
-  const dir = path.join(WORKSPACE_ROOT, sessionId);
-  await fs.mkdir(dir, { recursive: true });
-  return dir;
-}
-
-/**
- * Resolve a model-supplied path inside the session workspace.
- *
- * The path comes from model output, so it is untrusted: resolve to canonical
- * form and reject anything that escapes the session directory.
- */
-async function resolveInWorkspace(sessionId: string, rel: unknown): Promise<string> {
-  if (typeof rel !== "string" || rel.length === 0) {
-    throw new Error("path must be a non-empty string");
-  }
-  const root = await sessionWorkspace(sessionId);
-  const target = path.resolve(root, rel);
-  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
-  if (target !== root && !target.startsWith(rootWithSep)) {
-    throw new Error(`path escapes the session workspace: ${rel}`);
-  }
-  return target;
 }
 
 const listFiles: ToolSpec = {
@@ -115,12 +93,32 @@ const writeFile: ToolSpec = {
   },
 };
 
+/** Client-executed tools, keyed by the name the model calls. */
 export const TOOLS: Record<string, ToolSpec> = {
   list_files: listFiles,
   read_file: readFile,
   write_file: writeFile,
 };
 
-export const TOOL_DEFINITIONS: Anthropic.Tool[] = Object.values(TOOLS).map(
-  (t) => t.definition,
-);
+/** Tools whose results change the workspace, so the file panel should refresh. */
+export const WORKSPACE_MUTATING = new Set(["write_file"]);
+
+/**
+ * Web search is server-side, so there is nothing to execute locally - the model
+ * calls it and Anthropic returns the results inline.
+ *
+ * The tool version is model-dependent: the 2026 variant with dynamic filtering
+ * needs a current frontier model, and Haiku only supports the original.
+ */
+function webSearchTool(model: string): ToolDef {
+  return model.startsWith("claude-haiku")
+    ? ({ type: "web_search_20250305", name: "web_search", max_uses: 5 } as ToolDef)
+    : ({ type: "web_search_20260209", name: "web_search", max_uses: 5 } as ToolDef);
+}
+
+/** The `tools` array for one request, given a session's settings. */
+export function toolsFor(config: SessionConfig): ToolDef[] {
+  const defs: ToolDef[] = Object.values(TOOLS).map((t) => t.definition as ToolDef);
+  if (config.webSearch) defs.push(webSearchTool(config.model));
+  return defs;
+}

@@ -19,18 +19,26 @@ export function Avatar({
   /** Position in an overlapping stack; earlier avatars paint on top. */
   stackIndex?: number;
 }) {
+  const suffix = [
+    participant.role === "observer" ? "observing" : null,
+    participant.online ? null : "disconnected",
+  ]
+    .filter(Boolean)
+    .join(", ");
+
   return (
     <span
       className="avatar"
       data-color={participant.color}
       data-offline={!participant.online || undefined}
+      data-observer={participant.role === "observer" || undefined}
       style={{
         width: size,
         height: size,
         fontSize: size * 0.4,
         ...(stackIndex === undefined ? {} : { zIndex: 32 - stackIndex }),
       }}
-      title={title ?? `${participant.name}${participant.online ? "" : " (disconnected)"}`}
+      title={title ?? `${participant.name}${suffix ? ` (${suffix})` : ""}`}
     >
       {initials(participant.name)}
     </span>
@@ -50,6 +58,16 @@ export function Presence({
   const typingNames = participants
     .filter((p) => typing.has(p.id) && p.id !== me?.id)
     .map((p) => p.name);
+  const watching = participants.filter((p) => p.role === "observer").length;
+
+  const label = () => {
+    if (typingNames.length > 0) {
+      return `${typingNames.join(", ")} ${typingNames.length === 1 ? "is" : "are"} typing…`;
+    }
+    if (participants.length === 1) return "Only you here";
+    const base = `${participants.length} here`;
+    return watching > 0 ? `${base} · ${watching} watching` : base;
+  };
 
   return (
     <div className="presence">
@@ -59,13 +77,7 @@ export function Presence({
           <Avatar key={p.id} participant={p} stackIndex={i + 1} />
         ))}
       </div>
-      <span className="presence-label">
-        {typingNames.length > 0
-          ? `${typingNames.join(", ")} ${typingNames.length === 1 ? "is" : "are"} typing…`
-          : participants.length === 1
-            ? "Only you here"
-            : `${participants.length} here`}
-      </span>
+      <span className="presence-label">{label()}</span>
     </div>
   );
 }

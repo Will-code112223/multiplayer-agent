@@ -1,13 +1,43 @@
 import { useState } from "react";
+import type { SessionConfig } from "../shared/protocol.ts";
 import { Composer } from "./Composer.tsx";
+import { JoinGate } from "./JoinGate.tsx";
 import { Presence } from "./Presence.tsx";
+import { SessionSettings } from "./SessionSettings.tsx";
 import { Transcript } from "./Transcript.tsx";
+import { WorkspacePanel } from "./WorkspacePanel.tsx";
+import type { Identity } from "./useSession.ts";
 import { loadIdentity, saveIdentity, useSession } from "./useSession.ts";
 
 export function Room({ sessionId }: { sessionId: string }) {
-  const session = useSession(sessionId);
+  const [identity, setIdentity] = useState<Identity | null>(() => loadIdentity());
+  const [editing, setEditing] = useState(false);
+  const session = useSession(sessionId, identity);
   const [copied, setCopied] = useState(false);
-  const [name, setName] = useState(() => loadIdentity().name);
+  const [showFiles, setShowFiles] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+
+  // Nobody appears in the session until they have been through this. Reopening
+  // it later keeps the same participant id, so changing your name or role
+  // updates you in place rather than making you leave and rejoin as a stranger.
+  if (!identity || editing) {
+    return (
+      <JoinGate
+        sessionId={sessionId}
+        initial={identity}
+        onJoin={(next) => {
+          saveIdentity(next);
+          const returning = identity !== null;
+          setIdentity(next);
+          setEditing(false);
+          if (returning) {
+            session.send({ t: "rename", name: next.name, color: next.color });
+            session.send({ t: "setRole", role: next.role });
+          }
+        }}
+      />
+    );
+  }
 
   const copyLink = async () => {
     await navigator.clipboard.writeText(location.href);
@@ -15,18 +45,12 @@ export function Room({ sessionId }: { sessionId: string }) {
     setTimeout(() => setCopied(false), 1600);
   };
 
-  const commitName = () => {
-    const next = name.trim().slice(0, 32);
-    if (!next) {
-      setName(loadIdentity().name);
-      return;
-    }
-    saveIdentity({ ...loadIdentity(), name: next });
-    session.send({ t: "rename", name: next });
-  };
+  const observing = session.me?.role === "observer";
+  const idle = session.run.status === "idle";
+  const changeConfig = (patch: Partial<SessionConfig>) => session.send({ t: "setConfig", config: patch });
 
   return (
-    <div className="room">
+    <div className="room" data-panel={showFiles || undefined}>
       <header className="topbar">
         <div className="topbar-left">
           <a className="brand" href="#/">
@@ -41,36 +65,38 @@ export function Room({ sessionId }: { sessionId: string }) {
             data-status={session.run.status}
             data-connection={session.connection}
           >
-            {session.connection !== "open"
-              ? session.connection === "connecting"
-                ? "connecting"
-                : "reconnecting"
-              : session.run.status === "idle"
-                ? "idle"
-                : session.run.status === "running"
-                  ? "running"
-                  : "needs approval"}
+            {session.connection === "unauthorized"
+              ? "no access"
+              : session.connection !== "open"
+                ? "reconnecting"
+                : session.run.status === "idle"
+                  ? "idle"
+                  : session.run.status === "running"
+                    ? "running"
+                    : "needs approval"}
           </span>
         </div>
 
         <div className="topbar-right">
-          <span className="model-badge" title={session.mock ? "No API key found; the agent is scripted." : "Live model"}>
-            {session.mock ? "mock agent" : session.model || "…"}
-          </span>
-          <input
-            className="name-input"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onBlur={commitName}
-            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-            aria-label="Your display name"
-            maxLength={32}
-          />
-          <Presence
-            participants={session.participants}
-            typing={session.typing}
-            me={session.me}
-          />
+          <button
+            className="btn btn-ghost"
+            onClick={() => setShowSettings((v) => !v)}
+            title={session.config ? `Model: ${session.config.model}` : "Agent settings"}
+          >
+            {session.mock ? "mock agent" : (session.config?.model ?? "…")}
+          </button>
+          <button className="btn btn-ghost" onClick={() => setShowFiles((v) => !v)}>
+            Files{session.files.length > 0 ? ` · ${session.files.length}` : ""}
+          </button>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setEditing(true)}
+            title="Change your name, colour or role"
+          >
+            {session.me?.name ?? identity.name}
+            {observing ? " · observing" : ""}
+          </button>
+          <Presence participants={session.participants} typing={session.typing} me={session.me} />
           <button className="btn btn-ghost" onClick={copyLink}>
             {copied ? "Copied" : "Copy link"}
           </button>
@@ -82,9 +108,32 @@ export function Room({ sessionId }: { sessionId: string }) {
         onDecide={(entryId, approve) => session.send({ t: "decide", entryId, approve })}
       />
 
+      {showFiles && (
+        <WorkspacePanel
+          sessionId={sessionId}
+          files={session.files}
+          open={showFiles}
+          onClose={() => setShowFiles(false)}
+        />
+      )}
+
+      {showSettings && session.config && (
+        <SessionSettings
+          config={session.config}
+          models={session.models}
+          idle={idle}
+          observing={observing}
+          onChange={changeConfig}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      {session.denied && <div className="toast toast-denied">{session.denied}</div>}
+
       <Composer
         run={session.run}
         disabled={session.connection !== "open"}
+        observing={observing}
         send={session.send}
       />
     </div>

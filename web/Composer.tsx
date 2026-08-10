@@ -4,10 +4,12 @@ import type { ClientEvent, RunState } from "../shared/protocol.ts";
 export function Composer({
   run,
   disabled,
+  observing,
   send,
 }: {
   run: RunState;
   disabled: boolean;
+  observing: boolean;
   send: (event: ClientEvent) => void;
 }) {
   const [text, setText] = useState("");
@@ -45,6 +47,26 @@ export function Composer({
     setTyping(false);
     area.current?.focus();
   };
+
+  // Observers get the live stream but no controls, so the composer is replaced
+  // rather than merely disabled - a greyed-out box invites clicking at it.
+  if (observing) {
+    return (
+      <div className="composer">
+        <div className="composer-inner">
+          <div className="observing-bar">
+            <span className="observing-eye">◉</span>
+            <span>
+              You're observing. You can watch the agent work, but not send, interrupt, or approve.
+            </span>
+            <button className="btn" onClick={() => send({ t: "setRole", role: "participant" })}>
+              Join in
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="composer">
