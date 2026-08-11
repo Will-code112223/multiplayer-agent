@@ -3,21 +3,18 @@ import type { SessionConfig } from "../shared/protocol.ts";
 import type { ToolDef } from "./tools.ts";
 
 /**
- * The agent driver: one turn of the model, streamed, interruptible.
+ * One turn of the model: streamed and interruptible.
  *
- * Two implementations satisfy the same interface - the real Anthropic client,
- * and a scripted mock used when no credentials are present. The mock exists so
- * the multiplayer mechanics (streaming to many viewers, interrupting, steering,
- * queueing, shared tool approval) can be exercised end to end with zero setup.
+ * Two implementations share the interface - the real API client, and a scripted
+ * mock used when no credentials are present so the app is runnable without a key.
  *
- * Model and system prompt are per request, not per driver: a session can retune
- * them between turns, and one client instance serves every session because the
- * Anthropic client is stateless per call.
+ * Model and system prompt are per request, since a session can change them
+ * between turns.
  */
 
 export const DEFAULT_MODEL = "claude-opus-5";
 
-/** Models `setConfig` will accept. An allowlist, so a client cannot bill arbitrary ids. */
+/** Allowlist, so a client cannot bill arbitrary model ids. */
 export const MODELS = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"] as const;
 
 export const DEFAULT_CONFIG: SessionConfig = {
@@ -99,8 +96,7 @@ class AnthropicDriver implements AgentDriver {
       {
         model: req.model,
         max_tokens: 32000,
-        // Summarized thinking is the point in a shared session: spectators can
-        // watch the agent reason instead of staring at a spinner.
+        // Summarised thinking so spectators see progress, not just a spinner.
         thinking: { type: "adaptive", display: "summarized" },
         output_config: { effort: "high" },
         system: req.system,
@@ -168,7 +164,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** Split into word-ish chunks so the mock stream reads like real token output. */
+/** Word-ish chunks, so the mock stream resembles real token output. */
 function chunk(text: string): string[] {
   return text.match(/\S+\s*/g) ?? [];
 }
@@ -234,8 +230,7 @@ class MockDriver implements AgentDriver {
         handlers.onThinking(line + "\n");
       }
 
-      // Short asks get a plain reply; longer ones get a workspace artifact, which
-      // is what exercises the shared approval path.
+      // Longer asks produce a file, which exercises the approval path.
       const proposeWrite = ask.length > 12;
 
       await emit(

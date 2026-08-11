@@ -5,11 +5,9 @@ import type http from "node:http";
 /**
  * Serves the built client in production.
  *
- * In development Vite serves the client on its own port and proxies to this
- * server, so this handler stays inactive unless `dist/` exists. In production
- * one process serves the page, the REST endpoints and the WebSocket, which
- * means a single origin and a single port - the only shape that survives being
- * put behind a tunnel or a hosting platform.
+ * Inactive unless `dist/` exists, since Vite serves the client in development.
+ * In production one process serves the page, the API and the WebSocket from a
+ * single origin, which is what works behind a tunnel or a host.
  */
 
 const DIST = path.resolve(process.cwd(), "dist");
@@ -39,9 +37,8 @@ export function serveStatic(
   if (!hasBuild) return false;
   if (req.method !== "GET" && req.method !== "HEAD") return false;
 
-  // The path comes off the wire, so resolve to canonical form and confirm the
-  // result is still inside dist. Checking the raw string would miss `..`,
-  // symlinks, and percent-encoded traversal.
+  // Resolve to canonical form before checking containment; a raw string check
+  // would miss `..`, symlinks and percent-encoded traversal.
   let requested: string | null = null;
   try {
     const candidate = path.resolve(DIST, `.${decodeURIComponent(pathname)}`);
@@ -59,8 +56,8 @@ export function serveStatic(
   const isShell = file === path.join(DIST, "index.html");
   res.writeHead(200, {
     "content-type": MIME[path.extname(file)] ?? "application/octet-stream",
-    // Vite fingerprints asset filenames, so those cache forever. The shell must
-    // not, or clients pin themselves to a stale build.
+    // Asset filenames are fingerprinted so they cache forever; the shell must
+    // not, or clients pin to a stale build.
     "cache-control": isShell ? "no-cache" : "public, max-age=31536000, immutable",
   });
 

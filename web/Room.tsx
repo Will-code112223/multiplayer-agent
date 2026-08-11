@@ -17,9 +17,8 @@ export function Room({ sessionId }: { sessionId: string }) {
   const [showFiles, setShowFiles] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
-  // Nobody appears in the session until they have been through this. Reopening
-  // it later keeps the same participant id, so changing your name or role
-  // updates you in place rather than making you leave and rejoin as a stranger.
+  // Reopening keeps the same participant id, so a name or role change updates
+  // you in place rather than rejoining as a stranger.
   if (!identity || editing) {
     return (
       <JoinGate

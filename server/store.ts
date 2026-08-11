@@ -6,13 +6,8 @@ import type { Entry, Participant, SessionConfig } from "../shared/protocol.ts";
 /**
  * Session persistence: one JSON file per session under `data/sessions/`.
  *
- * Deliberately not a database. A prototype that must survive `Ctrl+C` needs
- * durability, not queries, and files keep the dependency count at zero.
- *
- * What is stored is the conversation, not the connection: sockets, the event
- * log, the pending queue and run state are all runtime-only and are rebuilt on
- * boot. The event log resetting means a reconnecting client's cursor is ahead
- * of the server's, which already falls back to a snapshot.
+ * Stores the conversation, not the connection. Sockets, the event log, the
+ * pending queue and run state are runtime-only and rebuilt on boot.
  */
 
 const DIR = path.resolve(process.cwd(), "data", "sessions");
@@ -38,19 +33,17 @@ function ensureDir(): void {
 }
 
 function fileFor(id: string): string {
-  // Session ids are server-generated, but this is a filesystem path, so refuse
-  // anything that isn't the shape we issue rather than trusting the caller.
+  // Filesystem path: refuse anything that is not the id shape we issue.
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error(`unsafe session id: ${id}`);
   return path.join(DIR, `${id}.json`);
 }
 
-/** Write immediately. Prefer `scheduleSave` on hot paths. */
+/** Immediate write. Prefer `scheduleSave` on hot paths. */
 function writeNow(session: PersistedSession): void {
   try {
     ensureDir();
     const target = fileFor(session.id);
-    // Write-then-rename, so a crash mid-write can't leave a truncated file that
-    // fails to parse on the next boot.
+    // Write-then-rename, so a crash mid-write cannot truncate the file.
     const temp = `${target}.tmp`;
     fs.writeFileSync(temp, JSON.stringify(session), "utf8");
     fs.renameSync(temp, target);
@@ -61,10 +54,7 @@ function writeNow(session: PersistedSession): void {
   }
 }
 
-/**
- * Queue a save. Repeated calls within the debounce window collapse into one,
- * which matters because a streaming turn mutates an entry on every token.
- */
+/** Queue a save. Calls within the debounce window collapse into one. */
 export function scheduleSave(session: PersistedSession): void {
   dirty.set(session.id, session);
   clearTimeout(timers.get(session.id));
@@ -99,9 +89,8 @@ export function remove(id: string): void {
 }
 
 /**
- * Load every persisted session, normalising anything that only made sense while
- * a process was running: nobody is connected, and a turn that was streaming when
- * the server stopped did not survive it.
+ * Load every persisted session, resetting state that only applied while the
+ * previous process was running.
  */
 export function loadAll(): PersistedSession[] {
   let names: string[];

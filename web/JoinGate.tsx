@@ -6,10 +6,10 @@ import type { Identity } from "./useSession.ts";
 import { randomName } from "./useSession.ts";
 
 /**
- * The screen in front of every room: choose who you are before you appear.
+ * Choose who you are before entering a room.
  *
- * It shows who is already inside, fetched over REST rather than by opening a
- * socket, so nobody sees you arrive until you have actually decided to join.
+ * Who is already inside comes from REST rather than an open socket, so nobody
+ * sees you arrive until you have joined.
  */
 export function JoinGate({
   sessionId,

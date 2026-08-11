@@ -16,7 +16,7 @@ export function Avatar({
   participant: Participant;
   size?: number;
   title?: string;
-  /** Position in an overlapping stack; earlier avatars paint on top. */
+  /** Position in the stack; earlier avatars paint on top. */
   stackIndex?: number;
 }) {
   const suffix = [
@@ -59,8 +59,8 @@ export function Presence({
     .filter((p) => typing.has(p.id) && p.id !== me?.id)
     .map((p) => p.name);
 
-  // "Here" means connected right now. Restored sessions carry people who were
-  // in the room before a restart, and counting them would overstate the room.
+  // "Here" means connected now: a restored session carries people who were in
+  // the room before a restart.
   const present = participants.filter((p) => p.online);
   const watching = present.filter((p) => p.role === "observer").length;
 

@@ -3,8 +3,8 @@ import type { ServerConfig, SessionSummary, WorkspaceFile } from "../shared/prot
 /**
  * REST calls to the session server.
  *
- * The access code, when the server requires one, rides on every request from
- * here. Keeping it in one module means no call site can forget it.
+ * The access code rides on every request from here, so no call site can
+ * forget it.
  */
 
 const CODE_KEY = "mpgpt.code";
@@ -76,8 +76,7 @@ export async function readFile(sessionId: string, filePath: string): Promise<str
   return await res.text();
 }
 
-/** Download URL for a workspace file. Carries the code as a query param, since
- *  a plain link cannot set a header. */
+/** Download URL. Uses a query param because a plain link cannot set a header. */
 export function fileDownloadUrl(sessionId: string, filePath: string): string {
   const encoded = filePath.split("/").map(encodeURIComponent).join("/");
   const code = loadCode();

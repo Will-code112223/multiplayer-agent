@@ -1,13 +1,10 @@
 /**
  * Loads `.env` before anything reads `process.env`.
  *
- * Import this first in the entrypoint - ES modules evaluate in import order, so
- * putting it above the other imports guarantees the agent driver sees the key.
+ * Import this first in the entrypoint: ES modules evaluate in import order.
  *
- * The key stays on the server. Nothing here reaches the browser: the client
- * talks only to this server, and this server talks to Anthropic. Never move the
- * key into anything under `web/` - Vite inlines that into the JS bundle, where
- * anyone who opens the page can read it.
+ * The API key stays server-side. Never move it under `web/` - Vite inlines
+ * that into the browser bundle.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -26,10 +23,6 @@ if (fs.existsSync(envFile)) {
 
 /**
  * Optional shared passcode. When set, every API call and WebSocket join must
- * present it.
- *
- * This is the only real access control in the app. Roles are a UX affordance
- * that any participant can change for themselves; this is the gate that
- * actually keeps strangers out of a session that spends your API credits.
+ * present it. This is the only real access control; roles are not.
  */
 export const ACCESS_CODE = process.env.ACCESS_CODE?.trim() || null;

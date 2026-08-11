@@ -4,10 +4,8 @@ import type { SessionConfig } from "../shared/protocol.ts";
 /**
  * Per-session agent settings.
  *
- * Changes are refused by the server while a turn is in flight, so the whole
- * popover goes read-only rather than letting someone click into a rejection.
- * Switching models is not free: it discards the prompt cache built up over the
- * conversation, and that cost is stated here rather than hidden.
+ * The server refuses changes while a turn is in flight, so the popover goes
+ * read-only rather than letting someone click into a rejection.
  */
 export function SessionSettings({
   config,
@@ -25,8 +23,7 @@ export function SessionSettings({
   onClose: () => void;
 }) {
   const [prompt, setPrompt] = useState(config.systemPromptExtra);
-  // Observers can read the settings but not change them, so the controls are
-  // locked rather than left clickable into a refusal.
+  // Observers can read but not change.
   const editable = idle && !observing;
 
   // Someone else may have edited it while this was open.

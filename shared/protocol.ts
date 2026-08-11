@@ -1,20 +1,17 @@
 /**
  * Wire protocol shared by the server and the web client.
  *
- * The server owns all session state. Clients are pure projections: they receive
- * a snapshot on join and a stream of deltas afterwards. Every delta carries a
- * monotonic `seq`, so a client that drops its socket can reconnect with the last
- * seq it saw and receive exactly the events it missed. That property is what
- * makes late-join and reconnect lossless, which is the whole point of a session
- * several people share.
+ * The server owns all session state; clients receive a snapshot on join and
+ * deltas afterwards. Every delta carries a monotonic `seq` so a client that
+ * drops its socket can reconnect with the last seq it saw and receive only
+ * what it missed.
  */
 
 /**
- * Observers watch a session without being able to act in it.
+ * Observers watch without acting.
  *
- * This is a UX affordance, not a security boundary: any participant can change
- * their own role. The access code is the only real gate, and it is
- * all-or-nothing. Do not treat `observer` as a permission.
+ * Not a permission: anyone can change their own role. ACCESS_CODE is the only
+ * real gate.
  */
 export type Role = "participant" | "observer";
 
@@ -136,18 +133,15 @@ export type ServerEvent =
   | { seq: number; t: "presence"; participants: Participant[] }
   | { seq: number; t: "typing"; participantId: string; typing: boolean }
   | { seq: number; t: "entry.add"; entry: Entry }
-  /** Full replacement of one entry. Cheap, and immune to patch-ordering bugs. */
+  /** Full replacement of one entry, rather than a patch. */
   | { seq: number; t: "entry.set"; entry: Entry }
-  /** Append-only text delta, the one place where bandwidth is worth optimizing. */
+  /** Append-only text delta. */
   | { seq: number; t: "agent.delta"; id: string; channel: "text" | "thinking"; text: string }
   | { seq: number; t: "run"; run: RunState }
   | { seq: number; t: "title"; title: string }
   | { seq: number; t: "config"; config: SessionConfig }
   | { seq: number; t: "files"; files: WorkspaceFile[] }
-  /**
-   * An intent was refused. Sent only to the socket that tried it, so it never
-   * enters the shared event log.
-   */
+  /** An intent was refused. Sent only to the socket that tried it. */
   | { seq: number; t: "denied"; reason: string };
 
 // ---------------------------------------------------------------------------

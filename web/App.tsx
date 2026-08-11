@@ -29,7 +29,7 @@ export function App() {
     try {
       const config = await getServerConfig();
       if (!config.authRequired) return setAccess("open");
-      // A stored code from a previous visit should not force the gate again.
+      // A stored code from a previous visit skips the gate.
       if (!loadCode()) return setAccess("locked");
       await listSessions();
       setAccess("open");

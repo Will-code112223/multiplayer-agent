@@ -7,10 +7,8 @@ import { resolveInWorkspace } from "./workspace.ts";
 /**
  * Tools the shared agent can call.
  *
- * The workspace is per-session and deliberately visible to everyone in that
- * session: it is the artifact a group gathers around. `write_file` requires an
- * approval from any participant, which is what makes the approval step a
- * multiplayer primitive rather than a modal only the owner can see.
+ * The workspace is per-session and visible to everyone in it. `write_file`
+ * requires approval from any participant before it runs.
  */
 
 /** One entry of the `tools` array on a Messages request. */
@@ -104,11 +102,9 @@ export const TOOLS: Record<string, ToolSpec> = {
 export const WORKSPACE_MUTATING = new Set(["write_file"]);
 
 /**
- * Web search is server-side, so there is nothing to execute locally - the model
- * calls it and Anthropic returns the results inline.
+ * Web search runs server-side, so there is nothing to execute locally.
  *
- * The tool version is model-dependent: the 2026 variant with dynamic filtering
- * needs a current frontier model, and Haiku only supports the original.
+ * The tool version is model-dependent; Haiku only supports the original.
  */
 function webSearchTool(model: string): ToolDef {
   return model.startsWith("claude-haiku")

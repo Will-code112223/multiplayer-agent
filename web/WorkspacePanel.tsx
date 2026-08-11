@@ -9,13 +9,7 @@ function humanSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/**
- * The group's shared artifacts.
- *
- * Files the agent writes used to be visible only inside the tool card that
- * created them, which scrolls away. Everything it has produced belongs in one
- * place the whole session can open.
- */
+/** Every file the agent has written, in one place the whole session can open. */
 export function WorkspacePanel({
   sessionId,
   files,
@@ -102,8 +96,7 @@ export function WorkspacePanel({
           {content === null && !error && <p className="file-loading">Loading…</p>}
           {content !== null &&
             (/\.(md|markdown)$/i.test(selected) ? (
-              // Markdown is the format the agent writes most, so render it
-              // rather than making the group read raw syntax.
+              // Render Markdown rather than showing raw syntax.
               <div className="file-body file-body-md">
                 <Markdown text={content} />
               </div>

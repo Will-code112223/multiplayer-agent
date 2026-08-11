@@ -48,11 +48,10 @@ export function randomName(): string {
 }
 
 /**
- * `?as=Name` opts a tab into a per-tab identity and skips the join screen.
+ * `?as=Name` gives a tab its own identity and skips the join screen.
  *
- * Without it, every tab in a browser shares one localStorage identity and so
- * shows up as the same person - which makes it impossible to try a multiplayer
- * session on your own, or to demo one from a single machine.
+ * Without it every tab shares one stored identity, so you cannot try a session
+ * with two people from a single browser.
  */
 function forcedName(): string | null {
   return new URLSearchParams(location.search).get("as");
@@ -105,10 +104,8 @@ const EMPTY_RUN: RunState = { status: "idle", queued: 0 };
 /**
  * Subscribe to a session.
  *
- * The client is a projection of server state: it applies a snapshot, then
- * deltas. On reconnect it replays from the last seq it saw, so a dropped socket
- * costs nothing - which matters when a session may run for hours and people
- * close laptops in the middle of it.
+ * Applies a snapshot, then deltas. On reconnect it replays from the last seq
+ * it saw, so a dropped socket loses nothing.
  */
 export function useSession(
   sessionId: string | null,
@@ -181,7 +178,7 @@ export function useSession(
 
       socket.onclose = (ev) => {
         if (disposed) return;
-        // 4001 is the server refusing the access code; retrying cannot help.
+        // 4001 means the access code was refused; retrying cannot help.
         if (ev.code === 4001) {
           setConnection("unauthorized");
           return;

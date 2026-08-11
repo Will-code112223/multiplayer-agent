@@ -43,10 +43,8 @@ export interface JoinRequest {
 /**
  * One shared agent session.
  *
- * Everything here is server-authoritative. Clients never mutate state directly;
- * they send intents (`say`, `steer`, `interrupt`, `decide`) and receive the
- * resulting events. That is what lets two people act on the same running agent
- * without either of them holding a lock.
+ * Server-authoritative: clients send intents (`say`, `steer`, `interrupt`,
+ * `decide`) and receive the resulting events. They never mutate state directly.
  */
 export class Session {
   readonly id: string;
@@ -79,10 +77,8 @@ export class Session {
   private nextEntryNumber = 0;
   private nextColor = 0;
 
-  // Written out longhand rather than as constructor parameter properties: those
-  // need code generation, and Node's built-in TypeScript support only strips
-  // types. Keeping to strippable syntax is what lets `npm start` run the server
-  // with plain `node`, no build step and no dev dependencies.
+  // Longhand rather than parameter properties: Node's TypeScript support only
+  // strips types, so `npm start` can run this with plain `node`.
   constructor(id: string, driver: AgentDriver, restored?: PersistedSession) {
     this.id = id;
     this.driver = driver;
@@ -95,7 +91,7 @@ export class Session {
       this.config = { ...DEFAULT_CONFIG, ...restored.config };
       for (const entry of this.entries) this.entryIndex.set(entry.id, entry);
       for (const person of restored.roster) this.participants.set(person.id, person);
-      // Entry ids must not collide with restored ones.
+      // Continue past restored ids so new entries cannot collide.
       this.nextEntryNumber =
         Math.max(0, ...this.entries.map((e) => Number(e.id.slice(1)) + 1 || 0)) || 0;
       this.nextColor = restored.roster.length;
@@ -115,7 +111,7 @@ export class Session {
       entries: this.entries,
       messages: this.messages,
       config: this.config,
-      // Presence is a runtime fact; store the roster as offline.
+      // Presence is runtime state; the stored roster is always offline.
       roster: [...this.participants.values()].map((p) => ({ ...p, online: false })),
     });
   }
@@ -145,12 +141,9 @@ export class Session {
     this.connections.add(connection);
     socket.once("close", () => this.detach(connection));
 
-    // Reconnect fast-path: replay only the events this client missed.
-    //
-    // The cursor has to be one this incarnation of the session can actually
-    // serve: not older than the retained log, and not ahead of us. A cursor from
-    // before a server restart looks ahead of ours, and replaying against it would
-    // send nothing at all and strand the client on an empty transcript.
+    // Replay only what this client missed. The cursor must be servable: not
+    // older than the retained log, and not ahead of us. A cursor from before a
+    // restart looks ahead, and replaying it would send nothing at all.
     const oldest = this.log[0]?.seq;
     const servable =
       req.since !== undefined && oldest !== undefined && req.since >= oldest - 1 && req.since <= this.seq;
@@ -184,7 +177,7 @@ export class Session {
     this.participants.set(connection.participantId, { ...participant, online: false });
     this.broadcastPresence();
 
-    // Hold the slot briefly so a page refresh does not read as leaving.
+    // Hold the slot briefly, so a page refresh does not read as leaving.
     const timer = setTimeout(() => {
       const current = this.participants.get(connection.participantId);
       if (!current || current.online) return;
@@ -260,10 +253,8 @@ export class Session {
   // -------------------------------------------------------------------------
 
   /**
-   * Observers are refused here rather than only in the UI.
-   *
-   * This is defence in depth for a nicer interface, not a security boundary:
-   * anyone can flip their own role. The access code is the only real gate.
+   * Observers are refused here, not just in the UI. Defence in depth for a
+   * nicer interface, not a security boundary: anyone can change their own role.
    */
   private actor(participantId: string, socketAction: string): Participant | null {
     const participant = this.participants.get(participantId);
@@ -341,10 +332,8 @@ export class Session {
   /**
    * Retune the agent for this session.
    *
-   * Refused while a turn is in flight: a model or prompt change mid-turn would
-   * apply to a conversation the previous model was halfway through, and it
-   * discards the prompt cache built up so far. Idle-only keeps the cost visible
-   * and the transcript honest about which model produced which answer.
+   * Idle-only: a change mid-turn would land on a conversation the previous
+   * model was halfway through, and it discards the prompt cache.
    */
   setConfig(participantId: string, patch: Partial<SessionConfig>): void {
     const by = this.actor(participantId, "change the agent settings");
@@ -451,7 +440,7 @@ export class Session {
       this.driving = false;
       this.abort = null;
       this.setRun({ status: "idle", queued: this.pending.length });
-      // A message that arrived during teardown still deserves a turn.
+      // A message that arrived during teardown still needs a turn.
       if (this.pending.length > 0) void this.drive();
     }
   }
@@ -529,7 +518,7 @@ export class Session {
     }
   }
 
-  /** Sent to one person only, so it never enters the shared log or moves cursors. */
+  /** Sent to one person; never enters the shared log or moves cursors. */
   private sendToParticipant(participantId: string, event: ServerEvent): void {
     for (const connection of this.connections) {
       if (connection.participantId === participantId) this.send(connection.socket, event);

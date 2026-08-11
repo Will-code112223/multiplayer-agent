@@ -48,8 +48,7 @@ export function Composer({
     area.current?.focus();
   };
 
-  // Observers get the live stream but no controls, so the composer is replaced
-  // rather than merely disabled - a greyed-out box invites clicking at it.
+  // Replaced rather than disabled: a greyed-out box invites clicking at it.
   if (observing) {
     return (
       <div className="composer">

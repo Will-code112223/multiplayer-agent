@@ -5,9 +5,8 @@ import type { WorkspaceFile } from "../shared/protocol.ts";
 /**
  * The session's shared workspace on disk.
  *
- * This module owns the single path-resolution guard. Both the agent's tools and
- * the HTTP file endpoints route through `resolveInWorkspace`, so the traversal
- * check exists in exactly one place rather than being reimplemented per caller.
+ * Owns the only path-resolution guard: the agent's tools and the HTTP file
+ * endpoints both route through `resolveInWorkspace`.
  */
 
 const ROOT = path.resolve(process.cwd(), "workspace");
@@ -22,12 +21,10 @@ export async function sessionWorkspace(sessionId: string): Promise<string> {
 }
 
 /**
- * Resolve a caller-supplied relative path inside one session's workspace.
+ * Resolve an untrusted relative path inside one session's workspace.
  *
- * The path arrives either from model output or from an HTTP request, so both
- * are untrusted. Resolve to canonical form first, then confirm the result is
- * still inside the session directory: checking the raw string would miss `..`,
- * absolute paths, and percent-encoded traversal.
+ * Resolves to canonical form before checking containment; a raw string check
+ * would miss `..`, absolute paths and percent-encoded traversal.
  */
 export async function resolveInWorkspace(sessionId: string, rel: unknown): Promise<string> {
   if (typeof rel !== "string" || rel.length === 0) {

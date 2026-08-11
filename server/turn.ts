@@ -15,10 +15,8 @@ import { TOOLS, WORKSPACE_MUTATING, toolsFor } from "./tools.ts";
 /**
  * One agent turn: stream, execute tools, repeat until the model stops asking.
  *
- * Split out of `Session` so this file knows nothing about sockets, presence, or
- * persistence. It talks to the session through `TurnContext`, whose methods are
- * all trivial - which is the point: the interesting logic here is the loop and
- * its interrupt handling, and it should be readable without a session in view.
+ * Talks to the session only through `TurnContext`, so this file has no
+ * knowledge of sockets, presence or persistence.
  */
 
 /** Cap on tool round-trips inside one turn, so a loop can't run away. */
@@ -106,8 +104,8 @@ export async function runAgentTurn(ctx: TurnContext, signal: AbortSignal): Promi
       agentEntry.status = "interrupted";
       agentEntry.interruptedBy = ctx.interruptedBy();
       ctx.setEntry(agentEntry);
-      // Keep the partial answer in history so the conversation stays coherent.
-      // Thinking blocks are dropped: an aborted stream never produced signed ones.
+      // Keep the partial answer so history stays coherent. Thinking blocks are
+      // dropped: an aborted stream never produced signed ones.
       if (outcome.partialText.trim()) {
         ctx.messages.push({ role: "assistant", content: outcome.partialText });
       }
@@ -122,13 +120,9 @@ export async function runAgentTurn(ctx: TurnContext, signal: AbortSignal): Promi
 
     const results = await executeTools(ctx, outcome.toolUses, signal);
 
-    // Tool results must be the very next user turn - a separate user message
-    // between tool_use and tool_result is rejected - so this is the earliest
-    // legal point to deliver anything queued during the turn.
-    //
-    // Unless we were interrupted: then the queue stays put, so the caller's loop
-    // starts a fresh turn for it instead of burying it in a turn already being
-    // torn down.
+    // Tool results must be the next user turn, so this is the earliest legal
+    // point to deliver anything queued mid-turn. On interrupt the queue stays
+    // put and the caller's loop starts a fresh turn for it.
     const content: Anthropic.ContentBlockParam[] = [...results];
     if (!signal.aborted) {
       for (const item of ctx.drainQueue()) {
@@ -154,8 +148,8 @@ export async function runAgentTurn(ctx: TurnContext, signal: AbortSignal): Promi
 /**
  * Run every requested tool, producing exactly one result per tool_use.
  *
- * The one-to-one guarantee matters even when the run is interrupted midway: an
- * assistant turn with an unanswered tool_use makes the next request invalid.
+ * Required even on interrupt: an unanswered tool_use makes the next request
+ * invalid.
  */
 async function executeTools(
   ctx: TurnContext,

@@ -1,18 +1,13 @@
 import type { ReactNode } from "react";
 
 /**
- * A small Markdown renderer for agent output.
+ * Markdown renderer for agent output.
  *
- * It builds React elements directly and never touches `dangerouslySetInnerHTML`,
- * so model output cannot inject markup or scripts into the page. That is the
- * reason this exists rather than a general-purpose library: the input is
- * untrusted text arriving over a socket, and the safest parser is one that has
- * no HTML path at all.
+ * Builds React elements directly and never uses `dangerouslySetInnerHTML`, so
+ * model output has no path to becoming markup or script. Covers the subset
+ * models actually emit and falls back to plain text for anything else.
  *
- * It covers the subset language models actually emit - headings, emphasis,
- * inline code, fenced code, lists, block quotes, tables, rules and links - and
- * degrades to plain text for anything else. It also has to survive being handed
- * a half-finished document, because it renders mid-stream.
+ * Must tolerate a half-finished document, since it renders mid-stream.
  */
 
 /** Only these schemes are allowed to become clickable. */
@@ -94,8 +89,8 @@ export function Markdown({ text }: { text: string }) {
   while (i < lines.length) {
     const line = lines[i] ?? "";
 
-    // Fenced code. An unterminated fence is normal mid-stream, so it runs to
-    // the end of what we have rather than being discarded.
+    // An unterminated fence is normal mid-stream, so it runs to the end of
+    // what we have rather than being discarded.
     if (line.trimStart().startsWith("```")) {
       const language = line.trim().slice(3).trim();
       const body: string[] = [];
@@ -206,7 +201,7 @@ export function Markdown({ text }: { text: string }) {
       continue;
     }
 
-    // Paragraph: consecutive plain lines belong together.
+    // Consecutive plain lines form one paragraph.
     const paragraph: string[] = [];
     while (
       i < lines.length &&

@@ -42,7 +42,7 @@ const server = http.createServer(async (req, res) => {
   };
 
   // Unauthenticated on purpose: the client needs to know whether to show the
-  // code screen. It reveals that a code exists, never the code itself.
+  // code screen. Reveals that a code exists, never the code itself.
   if (url.pathname === "/api/config") {
     return json(200, {
       authRequired: Boolean(ACCESS_CODE),
@@ -74,8 +74,7 @@ const server = http.createServer(async (req, res) => {
 
       if (parts[3] === "files") {
         if (parts.length === 4) return json(200, { files: await listWorkspace(session.id) });
-        // The path guard lives in workspace.ts, so traversal is rejected in one
-        // place rather than re-checked here.
+        // Traversal is rejected by the guard in workspace.ts.
         const rel = parts.slice(4).map(decodeURIComponent).join("/");
         try {
           const body = await readWorkspaceFile(session.id, rel);
@@ -159,8 +158,8 @@ wss.on("connection", (socket) => {
   });
 });
 
-// A port clash is the most common way this fails to start, usually because an
-// earlier copy is still running. Say that, instead of printing a stack trace.
+// The most common startup failure, usually an earlier copy still running.
+// Report it plainly instead of printing a stack trace.
 const onListenError = (error: NodeJS.ErrnoException) => {
   if (error.code !== "EADDRINUSE") throw error;
   console.error(
@@ -173,8 +172,7 @@ const onListenError = (error: NodeJS.ErrnoException) => {
 server.on("error", onListenError);
 wss.on("error", onListenError);
 
-// Persistence is debounced, so a pending write has to be flushed on the way out
-// or the last few seconds of a conversation are lost on Ctrl+C.
+// Persistence is debounced, so pending writes must be flushed on the way out.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     store.flushAll();

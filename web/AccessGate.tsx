@@ -1,13 +1,7 @@
 import { useState } from "react";
 import { listSessions, saveCode, Unauthorized } from "./api.ts";
 
-/**
- * The shared-passcode screen, shown only when the server sets ACCESS_CODE.
- *
- * This is the app's only real access control. Roles are a UX affordance anyone
- * can change for themselves; this is what keeps strangers out of a session that
- * spends the host's API credits.
- */
+/** Shared-passcode screen, shown only when the server sets ACCESS_CODE. */
 export function AccessGate({ onUnlocked }: { onUnlocked: () => void }) {
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);

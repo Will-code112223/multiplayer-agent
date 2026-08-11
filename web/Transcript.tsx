@@ -19,7 +19,7 @@ function UserBubble({ entry }: { entry: UserEntry }) {
           <span className="entry-time">{time(entry.at)}</span>
           {entry.queued && <span className="chip chip-queued">queued</span>}
         </header>
-        {/* People type plain text, so it is shown as typed rather than parsed. */}
+        {/* Shown as typed: people write plain text, not Markdown. */}
         <p className="entry-text">{entry.text}</p>
       </div>
     </article>
@@ -80,7 +80,7 @@ function AgentBubble({ entry }: { entry: AgentEntry }) {
   );
 }
 
-/** One-line summary of what a tool call is about to do, so the card reads at a glance. */
+/** One-line summary, so a collapsed card still says what it does. */
 function toolSummary(entry: ToolEntry): string | null {
   const input = entry.input as Record<string, unknown> | null;
   if (!input || typeof input !== "object") return null;
@@ -103,8 +103,8 @@ function ToolCard({
 }) {
   const pending = entry.status === "pending-approval";
   const json = JSON.stringify(entry.input, null, 2);
-  // A pending call is a decision, so show the detail. Settled calls collapse:
-  // a full file body inlined in the transcript buries the conversation.
+  // Pending calls need their detail visible; settled ones collapse so a file
+  // body does not bury the conversation.
   const [open, setOpen] = useState(pending);
   const summary = toolSummary(entry);
 
@@ -162,7 +162,7 @@ export function Transcript({
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
-  // Follow the stream, but stop fighting anyone who has scrolled up to read.
+  // Follow the stream, unless the reader has scrolled up.
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -181,7 +181,7 @@ export function Transcript({
   return (
     <div className="transcript" ref={ref}>
       <div className="transcript-inner">
-        {/* Join/leave notices alone should not count as "the session has started". */}
+        {/* Join/leave notices alone do not count as a started session. */}
         {entries.every((e) => e.kind === "system") && (
           <div className="empty">
             <h2>Nobody has said anything yet.</h2>
