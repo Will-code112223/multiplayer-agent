@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { WorkspaceFile } from "../shared/protocol.ts";
 import { fileDownloadUrl, readFile } from "./api.ts";
+import { Markdown } from "./Markdown.tsx";
 
 function humanSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -99,7 +100,16 @@ export function WorkspacePanel({
           </header>
           {error && <p className="file-error">{error}</p>}
           {content === null && !error && <p className="file-loading">Loading…</p>}
-          {content !== null && <pre className="file-body">{content}</pre>}
+          {content !== null &&
+            (/\.(md|markdown)$/i.test(selected) ? (
+              // Markdown is the format the agent writes most, so render it
+              // rather than making the group read raw syntax.
+              <div className="file-body file-body-md">
+                <Markdown text={content} />
+              </div>
+            ) : (
+              <pre className="file-body">{content}</pre>
+            ))}
         </div>
       )}
     </aside>

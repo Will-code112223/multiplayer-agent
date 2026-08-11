@@ -58,14 +58,18 @@ export function Presence({
   const typingNames = participants
     .filter((p) => typing.has(p.id) && p.id !== me?.id)
     .map((p) => p.name);
-  const watching = participants.filter((p) => p.role === "observer").length;
+
+  // "Here" means connected right now. Restored sessions carry people who were
+  // in the room before a restart, and counting them would overstate the room.
+  const present = participants.filter((p) => p.online);
+  const watching = present.filter((p) => p.role === "observer").length;
 
   const label = () => {
     if (typingNames.length > 0) {
       return `${typingNames.join(", ")} ${typingNames.length === 1 ? "is" : "are"} typing…`;
     }
-    if (participants.length === 1) return "Only you here";
-    const base = `${participants.length} here`;
+    if (present.length <= 1) return "Only you here";
+    const base = `${present.length} here`;
     return watching > 0 ? `${base} · ${watching} watching` : base;
   };
 

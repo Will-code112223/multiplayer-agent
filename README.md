@@ -95,6 +95,7 @@ Stop the tunnel with `Ctrl+C`; the URL dies with it, and a new one is issued eac
 | **Persistence** | Sessions survive a restart. Transcripts, the model conversation, settings, and the roster are written to `data/sessions/`. |
 | **Workspace panel** | Everything the agent has written, in one place: list, read, download. Updates live as it writes. |
 | **Agent settings** | Per-session model, web search, and extra instructions. Changes are refused while the agent is running. |
+| **Rendered output** | Agent messages and `.md` artifacts render as real Markdown - headings, lists, tables, code. The renderer builds React nodes and never injects HTML, so model output cannot script the page. |
 
 ## What is actually multiplayer here
 
@@ -146,6 +147,7 @@ That is what lets two people act on one running agent without either of them hol
 | `server/store.ts` | Session persistence: debounced JSON per session, flushed on exit |
 | `server/workspace.ts` | The single path-traversal guard, shared by the tools and the file API |
 | `web/useSession.ts` | Socket client: snapshot, deltas, reconnect from a cursor |
+| `web/Markdown.tsx` | Markdown renderer with no HTML path, for untrusted model output |
 
 ## Model configuration
 

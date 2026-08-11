@@ -1,4 +1,4 @@
-# multiplayer-agent: features, auth, persistence, Lovable frontend
+# multiplayer-agent: features, auth, persistence, frontend
 
 Date: 2026-08-09
 Status: approved, in implementation
@@ -6,7 +6,7 @@ Status: approved, in implementation
 ## Context
 
 The prototype works but is thin: sessions die on restart, everyone is anonymous with an auto-assigned name, the agent's files are buried inside tool cards, and the model is a module constant.
-This spec covers the work to close those gaps, plus publishing the project and handing the frontend shell to Lovable.
+This spec covers the work to close those gaps, plus publishing the project and a design pass on the frontend.
 
 ## Decisions
 
@@ -15,7 +15,7 @@ This spec covers the work to close those gaps, plus publishing the project and h
 | Persistence | Yes. Sessions survive restart. |
 | Auth | Yes. Optional shared access code, off unless `ACCESS_CODE` is set. |
 | Model switching | Allowed only while the agent is idle, and the cache cost is surfaced in the UI and the transcript. |
-| Frontend | Lovable builds the presentational shell only. The protocol hook stays hand-written. |
+| Frontend | Built and designed in-repo. A Lovable handoff was specced and then dropped: the frontend already existed, and splitting it across a generator would have meant reintegrating the one part worth keeping. |
 | Repo | Public, `multiplayer-agent`. |
 
 ## Non-goals
@@ -92,14 +92,19 @@ The `web_search` tool version depends on the model: `web_search_20260209` on Opu
 The agent loop (`runTurn`, `executeTools`, approval waiting) moves to `server/turn.ts`, leaving session state, presence, and the event log behind.
 Nothing else is restructured.
 
-## Phase 3: Lovable
+## Phase 3: frontend design pass
 
-`docs/lovable-brief.md` describes the three screens, the component inventory, and the exact data shapes each component renders.
-It instructs Lovable to build no networking: components take props and expose callbacks.
-The reconnect and replay logic in `useSession.ts` is where both real bugs in this project were found, and it is not being regenerated.
+The frontend was already hand-written and working, so this is a design pass rather than a rebuild.
 
-Lovable defaults toward Supabase and shadcn; the brief states there is no backend to connect.
-The user runs Lovable and pushes the result; integration is porting `useSession.ts` in and wiring props.
+The largest gap was that agent output rendered as raw text: headings, bold, lists, tables and code fences all showed their markup literally, which made a working product read like a debug view.
+
+`web/Markdown.tsx` renders the subset language models actually emit.
+It builds React elements directly and never uses `dangerouslySetInnerHTML`, because the input is untrusted text arriving over a socket; the safest parser is one with no HTML path at all.
+Link hrefs are restricted to `http`, `https` and `mailto`, so a `javascript:` URL in model output cannot become clickable.
+It also has to survive rendering a half-finished document, since it runs mid-stream.
+
+Tool cards collapse to a single summary line once settled, with the raw JSON behind a disclosure.
+A 2KB file body inlined in the transcript buried the conversation it was part of.
 
 ## Testing
 
